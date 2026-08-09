@@ -1,0 +1,6 @@
+libs/
+src/main/kotlin/**jet.kts
+# Project exclude paths
+/.gradle/
+/build/
+/build/classes/kotlin/main/
