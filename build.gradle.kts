@@ -21,13 +21,20 @@ dependencies {
     implementation(kotlin("stdlib"))
     implementation(
         fileTree("libs/") {
-            include("jetscript*.jar")
+            include("jetscript-definition-*.jar")
+        },
+    )
+
+    modImplementation(
+        fileTree("libs/") {
+            include("jetscript-*.jar")
+            exclude("jetscript-definition-*.jar")
         },
     )
     modImplementation(
         fileTree("libs/") {
             include("*.jar")
-            exclude("jetscript-definition-*.jar")
+            exclude("jetscript*.jar")
         },
     )
     implementation(kotlin("stdlib-jdk8"))
