@@ -1,5 +1,6 @@
 libs/
-src/main/kotlin/**/**jet.kts
+src/main/kotlin/**/**.jet.kts
+src/main/kotlin/**/**.jetlib.kt
 # Project exclude paths
 /.gradle/
 /build/

@@ -21,7 +21,7 @@ To change a script:
 
 1. Run the sync shell script to sync mods to your computer and copy scripts from and to the server.
 2. Sync the Gradle project if libs/ was updated
-3. Put scripts in src/main/kotlin/ or a subdirectory of that.
+3. Put .jet.kts scripts or .jetlib.kt library files in src/main/kotlin/ or a subdirectory of that.
 4. Run the sync shell script again and then reload on the server with /jetscript reload
 
 - Make sure the permissions for every subfolder is 755 after uploading as the server cannot read from the default folder permission

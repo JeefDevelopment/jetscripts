@@ -1,0 +1,1 @@
+package ${NAME.replace(".jetlib","")}
