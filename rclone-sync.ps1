@@ -15,6 +15,8 @@ $LocalMods = Join-Path $ProjectRoot "libs"
 $LocalScripts = Join-Path $ProjectRoot "src\main\kotlin"
 $StateDirectory = Join-Path $ProjectRoot ".rclone-state"
 $LocalVersions = Join-Path $ProjectRoot ".rclone-versions"
+$SyncPolicyVersion = "2"
+$SyncPolicyMarker = Join-Path $StateDirectory "sync-policy-version.txt"
 
 $RemoteMods = "testserver:mods"
 $RemoteScripts = "testserver:jet/scripts"
@@ -50,10 +52,10 @@ function New-BisyncArguments {
         $LocalScripts
         $RemoteScripts
         "--workdir", $StateDirectory
-        # Keep both sides on simultaneous edits; do not trust clock order to
-        # silently choose a winner on collaborators' computers.
-        "--conflict-resolve", "none"
-        "--conflict-loser", "num"
+        # Keep the newer working copy. The replaced loser is handled as a
+        # deletion, so backup-dir preserves it outside the working tree.
+        "--conflict-resolve", "newer"
+        "--conflict-loser", "delete"
         "--backup-dir1", $LocalVersions
         "--backup-dir2", $RemoteVersions
         "--suffix", ".$timestamp"
@@ -64,8 +66,13 @@ function New-BisyncArguments {
         # Some SFTP servers incorrectly reset a directory's POSIX mode while
         # handling a timestamp-only SETSTAT request (for example, 0755 -> 0644).
         "--no-update-dir-modtime"
+        # Do not replicate artifacts produced by the old conflict policy or by
+        # the equal-timestamp fallback where rclone cannot choose a winner.
+        "--exclude", "*.conflict*.kts"
+        "--exclude", "*.conflict*.kt"
         "--include", "*.jet.kts"
         "--include", "*.jetlib.kt"
+        "--modify-window", "2s"
 #         "--exclude", "/RCLONE_TEST"
 #         "--verbose"
     )
@@ -90,6 +97,13 @@ function New-BisyncArguments {
 }
 
 function Test-BisyncInitialized {
+    if (-not (Test-Path -LiteralPath $SyncPolicyMarker -PathType Leaf)) {
+        return $false
+    }
+    if ((Get-Content -LiteralPath $SyncPolicyMarker -Raw).Trim() -ne $SyncPolicyVersion) {
+        return $false
+    }
+
     # Successful bisync runs leave a matched pair of baseline listings. Dry-run
     # listings end in .lst-dry and intentionally do not count as initialization.
     foreach ($path1 in Get-ChildItem -LiteralPath $StateDirectory -Filter "*.path1.lst" -File -ErrorAction SilentlyContinue) {
@@ -120,6 +134,7 @@ function Initialize-Bisync {
     }
 
     Invoke-Rclone -Arguments (New-BisyncArguments -Initialize) | Out-Null
+    Set-Content -LiteralPath $SyncPolicyMarker -Value $SyncPolicyVersion -NoNewline
     Write-Host "Initial synchronization completed." -ForegroundColor Green
 }
 
@@ -153,13 +168,13 @@ New-Item -ItemType Directory -Force -Path $StateDirectory, $LocalVersions | Out-
 
 # Prevent two copies of this script on the same computer from corrupting the
 # same bisync state. This does not lock out collaborators on other computers.
-$mutex = [Threading.Mutex]::new($false, "Local\SilverTestJetScriptsRcloneSync")
+$mutex = [Threading.Mutex]::new($false, "Local\JetScriptsRcloneSync")
 $hasMutex = $false
 
 try {
     $hasMutex = $mutex.WaitOne(0)
     if (-not $hasMutex) {
-        throw "Another SilverTest synchronization is already running on this computer."
+        throw "Another Jet Scripts synchronization is already running on this computer."
     }
 
     if ($Mode -eq "init") {
