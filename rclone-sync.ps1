@@ -15,7 +15,7 @@ $LocalMods = Join-Path $ProjectRoot "libs"
 $LocalScripts = Join-Path $ProjectRoot "src\main\kotlin"
 $StateDirectory = Join-Path $ProjectRoot ".rclone-state"
 $LocalVersions = Join-Path $ProjectRoot ".rclone-versions"
-$SyncPolicyVersion = "2"
+$SyncPolicyVersion = "3"
 $SyncPolicyMarker = Join-Path $StateDirectory "sync-policy-version.txt"
 
 $RemoteMods = "testserver:mods"
@@ -68,10 +68,14 @@ function New-BisyncArguments {
         "--no-update-dir-modtime"
         # Do not replicate artifacts produced by the old conflict policy or by
         # the equal-timestamp fallback where rclone cannot choose a winner.
-        "--exclude", "*.conflict*.kts"
-        "--exclude", "*.conflict*.kt"
-        "--include", "*.jet.kts"
-        "--include", "*.jetlib.kt"
+        # Filter rules are evaluated in this exact order. Include directories
+        # so rclone continues traversing them before rejecting all other files.
+        "--filter", "- *.conflict*.kts"
+        "--filter", "- *.conflict*.kt"
+        "--filter", "+ **/"
+        "--filter", "+ *.jet.kts"
+        "--filter", "+ *.jetlib.kt"
+        "--filter", "- **"
         "--modify-window", "2s"
 #         "--exclude", "/RCLONE_TEST"
 #         "--verbose"
