@@ -7,3 +7,4 @@ src/main/kotlin/**/**.jetlib.kt
 /build/classes/kotlin/main/
 .rclone-state/
 .rclone-versions/
+.gradle*

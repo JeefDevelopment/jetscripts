@@ -2,6 +2,7 @@ import groovy.json.JsonSlurper
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 
@@ -87,6 +88,43 @@ val selectedLocalModFiles = selectedLocalMods.map { it.file }.toSet()
 val supersededLocalMods = discoveredLocalMods.filter { it.file !in selectedLocalModFiles }
 
 data class DiscoveredNestedApi(val file: File, val touchesMinecraft: Boolean)
+data class NestedJarCandidate(
+    val bytes: ByteArray,
+    val origin: String,
+    val id: String?,
+    val version: String?,
+    val touchesMinecraft: Boolean,
+    val suppliesImportedApi: Boolean,
+    val hash: String,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as NestedJarCandidate
+
+        if (touchesMinecraft != other.touchesMinecraft) return false
+        if (suppliesImportedApi != other.suppliesImportedApi) return false
+        if (!bytes.contentEquals(other.bytes)) return false
+        if (origin != other.origin) return false
+        if (id != other.id) return false
+        if (version != other.version) return false
+        if (hash != other.hash) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = touchesMinecraft.hashCode()
+        result = 31 * result + suppliesImportedApi.hashCode()
+        result = 31 * result + bytes.contentHashCode()
+        result = 31 * result + origin.hashCode()
+        result = 31 * result + id.hashCode()
+        result = 31 * result + version.hashCode()
+        result = 31 * result + hash.hashCode()
+        return result
+    }
+}
 
 val importedClassPaths = fileTree("src/main/kotlin") {
     include("**/*.kt", "**/*.kts")
@@ -140,47 +178,126 @@ fun nestedJarTouchesMinecraft(bytes: ByteArray): Boolean {
     return false
 }
 
-val discoveredNestedApis = buildList {
-    selectedLocalMods
-        // Fabric API is already supplied from its published Maven module.
-        .filter { it.id != "fabric-api" }
-        .forEach { outerMod ->
-            ZipFile(outerMod.file).use { outerZip ->
-                val metadataEntry = outerZip.getEntry("fabric.mod.json") ?: return@use
-                val metadata = outerZip.getInputStream(metadataEntry).bufferedReader().use {
+fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+    .digest(bytes)
+    .joinToString("") { "%02x".format(it) }
+
+data class NestedJarContents(
+    val id: String?,
+    val version: String?,
+    val children: List<Pair<String, ByteArray>>,
+)
+
+fun readNestedJarContents(bytes: ByteArray): NestedJarContents {
+    var metadata: Map<String, Any?>? = null
+    val jarEntries = linkedMapOf<String, ByteArray>()
+
+    ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+        while (true) {
+            val entry = zip.nextEntry ?: break
+            when {
+                entry.name == "fabric.mod.json" -> {
                     @Suppress("UNCHECKED_CAST")
-                    JsonSlurper().parse(it) as Map<String, Any?>
+                    metadata = JsonSlurper().parseText(
+                        String(zip.readBytes(), StandardCharsets.UTF_8),
+                    ) as Map<String, Any?>
                 }
-                val nestedPaths = (metadata["jars"] as? Collection<*>)
-                    .orEmpty()
-                    .mapNotNull { (it as? Map<*, *>)?.get("file")?.toString() }
-
-                nestedPaths.forEach { nestedPath ->
-                    val nestedEntry = outerZip.getEntry(nestedPath) ?: return@forEach
-                    val bytes = outerZip.getInputStream(nestedEntry).use { it.readBytes() }
-                    val classNames = listNestedClasses(bytes)
-                    if (!nestedJarSuppliesImportedApi(classNames)) return@forEach
-                    val touchesMinecraft = nestedJarTouchesMinecraft(bytes)
-
-                    val outerName = outerMod.id.orEmpty()
-                        .ifBlank { outerMod.file.nameWithoutExtension }
-                        .replace(Regex("[^A-Za-z0-9._-]"), "_")
-                    val outputDirectory = layout.buildDirectory
-                        .dir("generated/imported-nested-apis/$outerName")
-                        .get().asFile
-                    val outputJar = outputDirectory.resolve(nestedPath.substringAfterLast('/'))
-                    val expectedStamp = "${outerMod.file.length()}:${outerMod.file.lastModified()}:${nestedEntry.crc}"
-                    val stampFile = outputDirectory.resolve("${outputJar.name}.stamp")
-
-                    if (!outputJar.isFile || !stampFile.isFile || stampFile.readText() != expectedStamp) {
-                        outputDirectory.mkdirs()
-                        outputJar.writeBytes(bytes)
-                        stampFile.writeText(expectedStamp)
-                    }
-                    add(DiscoveredNestedApi(outputJar, touchesMinecraft))
+                !entry.isDirectory && entry.name.endsWith(".jar", ignoreCase = true) -> {
+                    jarEntries[entry.name] = zip.readBytes()
                 }
             }
         }
+    }
+
+    val childPaths = (metadata?.get("jars") as? Collection<*>)
+        .orEmpty()
+        .mapNotNull { (it as? Map<*, *>)?.get("file")?.toString() }
+    return NestedJarContents(
+        metadata?.get("id")?.toString(),
+        metadata?.get("version")?.toString(),
+        childPaths.mapNotNull { path -> jarEntries[path]?.let { path to it } },
+    )
+}
+
+val nestedCandidates = mutableListOf<NestedJarCandidate>()
+val visitedNestedHashes = mutableSetOf<String>()
+
+fun visitNestedJar(bytes: ByteArray, origin: String) {
+    val hash = sha256(bytes)
+    if (!visitedNestedHashes.add(hash)) return
+
+    val contents = readNestedJarContents(bytes)
+    val classes = listNestedClasses(bytes)
+    nestedCandidates += NestedJarCandidate(
+        bytes = bytes,
+        origin = origin,
+        id = contents.id,
+        version = contents.version,
+        touchesMinecraft = nestedJarTouchesMinecraft(bytes),
+        suppliesImportedApi = nestedJarSuppliesImportedApi(classes),
+        hash = hash,
+    )
+    contents.children.forEach { (path, childBytes) ->
+        visitNestedJar(childBytes, "$origin!/$path")
+    }
+}
+
+selectedLocalMods
+    // Fabric API is supplied from its published Maven module and already
+    // carries its complete component dependency graph.
+    .filter { it.id != "fabric-api" }
+    .forEach { outerMod ->
+        ZipFile(outerMod.file).use { outerZip ->
+            val metadataEntry = outerZip.getEntry("fabric.mod.json") ?: return@use
+            val metadata = outerZip.getInputStream(metadataEntry).bufferedReader().use {
+                @Suppress("UNCHECKED_CAST")
+                JsonSlurper().parse(it) as Map<String, Any?>
+            }
+            val nestedPaths = (metadata["jars"] as? Collection<*>)
+                .orEmpty()
+                .mapNotNull { (it as? Map<*, *>)?.get("file")?.toString() }
+            nestedPaths.forEach { path ->
+                val entry = outerZip.getEntry(path) ?: return@forEach
+                val bytes = outerZip.getInputStream(entry).use { it.readBytes() }
+                visitNestedJar(bytes, "${outerMod.file.name}!/$path")
+            }
+        }
+    }
+
+val selectedOuterModIds = selectedLocalMods.mapNotNull { it.id }.toSet()
+val selectedNestedCandidates = nestedCandidates
+    .filter {
+        (it.touchesMinecraft || it.suppliesImportedApi) && it.id !in selectedOuterModIds
+    }
+    .groupBy { it.id ?: it.hash }
+    .values
+    .map { versions ->
+        versions.maxWithOrNull { left, right ->
+            compareVersionParts(left.version.orEmpty(), right.version.orEmpty())
+                .takeIf { it != 0 }
+                ?: left.hash.compareTo(right.hash)
+        }!!
+    }
+
+val discoveredNestedApis = buildList {
+    selectedNestedCandidates.forEach { candidate ->
+        val identity = candidate.id.orEmpty()
+            .ifBlank { candidate.origin.substringBefore("!/").substringBeforeLast('.') }
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val jarName = candidate.origin.substringAfterLast('/').ifBlank { "$identity.jar" }
+        val outputDirectory = layout.buildDirectory
+            .dir("generated/imported-nested-apis/$identity")
+            .get().asFile
+        val outputJar = outputDirectory.resolve(jarName)
+        val stampFile = outputDirectory.resolve("${outputJar.name}.stamp")
+
+        if (!outputJar.isFile || !stampFile.isFile || stampFile.readText() != candidate.hash) {
+            outputDirectory.mkdirs()
+            outputJar.writeBytes(candidate.bytes)
+            stampFile.writeText(candidate.hash)
+        }
+        add(DiscoveredNestedApi(outputJar, candidate.touchesMinecraft))
+    }
 }
 tasks.register("reportLocalModSelection") {
     description = "Shows which duplicate local Fabric mods are excluded from the classpath"
